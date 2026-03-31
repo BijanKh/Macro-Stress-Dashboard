@@ -10,18 +10,20 @@
     "backfill": "node scripts/backfill.js"
   },
   "dependencies": {
-    "express": "^4.18",
     "better-sqlite3": "^11",
-    "node-cron": "^3",
+    "cors": "^2",
     "dotenv": "^16",
-    "cors": "^2"
+    "express": "^4.18",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "node-cron": "^3"
   },
   "devDependencies": {
-    "vite": "^5",
     "@vitejs/plugin-react": "^4",
+    "concurrently": "^8",
     "react": "^18",
     "react-dom": "^18",
     "recharts": "^2",
-    "concurrently": "^8"
+    "vite": "^5"
   }
 }

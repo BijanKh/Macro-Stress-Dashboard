@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { fetchAllSeries, SERIES } from './fred.js';
@@ -9,14 +11,67 @@ import { saveObservations, saveSnapshot, getHistory, getHYHistory, getLatestSnap
 import { startScheduler } from './scheduler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3456;
+const isProduction = process.env.NODE_ENV === 'production';
+
+const PORT = (() => {
+  const p = parseInt(process.env.PORT, 10);
+  return Number.isInteger(p) && p >= 1 && p <= 65535 ? p : 3456;
+})();
+
 const app = express();
 
-app.use(cors());
+// Security headers
+app.use(helmet({
+  contentSecurityPolicy: isProduction ? undefined : false,
+}));
+
+// CORS — restrict to known origins
+const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',')
+  : ['http://localhost:5173', 'http://localhost:3456'];
+
+app.use(cors({
+  origin: ALLOWED_ORIGINS,
+  methods: ['GET', 'HEAD', 'OPTIONS'],
+}));
+
+// Rate limiting
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, please try again later.' },
+});
+app.use('/api/', apiLimiter);
+
+const refreshLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Refresh rate limited. Try again in a minute.' },
+});
+
+// Request logging
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    console.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now() - start}ms`);
+  });
+  next();
+});
 
 // In production, serve Vite build
-if (process.env.NODE_ENV === 'production') {
+if (isProduction) {
   app.use(express.static(path.join(__dirname, '..', 'client', 'dist')));
+}
+
+// Validate and clamp days param
+function parseDays(raw) {
+  const d = parseInt(raw, 10);
+  if (!Number.isInteger(d) || d < 1) return 90;
+  return Math.min(d, 1000);
 }
 
 let cachedResult = null;
@@ -55,7 +110,6 @@ export async function fetchAndStore() {
 app.get('/api/current', async (req, res) => {
   try {
     if (!cachedResult) {
-      // Try loading from DB first
       const dbSnapshot = getLatestSnapshot();
       if (dbSnapshot) {
         res.json({
@@ -80,18 +134,17 @@ app.get('/api/current', async (req, res) => {
         });
         return;
       }
-      // No cached data and no DB data — fetch fresh
       cachedResult = await fetchAndStore();
     }
     res.json(cachedResult);
   } catch (err) {
     console.error('Error in /api/current:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to load current data.' });
   }
 });
 
 app.get('/api/history', (req, res) => {
-  const days = parseInt(req.query.days) || 90;
+  const days = parseDays(req.query.days);
   const history = getHistory(days);
   res.json({
     history: history.map(h => ({
@@ -104,28 +157,28 @@ app.get('/api/history', (req, res) => {
 });
 
 app.get('/api/hy-history', (req, res) => {
-  const days = parseInt(req.query.days) || 90;
+  const days = parseDays(req.query.days);
   res.json({ history: getHYHistory(days) });
 });
 
-app.get('/api/refresh', async (req, res) => {
+app.get('/api/refresh', refreshLimiter, async (req, res) => {
   try {
     const result = await fetchAndStore();
     res.json(result);
   } catch (err) {
     console.error('Error in /api/refresh:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Refresh failed. Try again later.' });
   }
 });
 
 // SPA fallback for production
-if (process.env.NODE_ENV === 'production') {
+if (isProduction) {
   app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'client', 'dist', 'index.html'));
   });
 }
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT} (${isProduction ? 'production' : 'development'})`);
   startScheduler(fetchAndStore);
 });

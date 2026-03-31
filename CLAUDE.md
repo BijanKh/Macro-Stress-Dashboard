@@ -81,7 +81,7 @@ macro-stress-monitor/
 ## Environment Variables
 
 ```env
-FRED_API_KEY=e6f950bf7bb16b75fe7a276acebaf6de
+FRED_API_KEY=<your_fred_api_key>   # Get one free at https://fred.stlouisfed.org/docs/api/api_key.html
 PORT=3456
 ```
 
@@ -397,7 +397,7 @@ Run once after first setup: `node scripts/backfill.js`
 npm install
 
 # Set up .env
-echo "FRED_API_KEY=e6f950bf7bb16b75fe7a276acebaf6de" > .env
+echo "FRED_API_KEY=<your_fred_api_key>" > .env
 echo "PORT=3456" >> .env
 
 # Backfill historical data (one-time, takes ~30 seconds)
