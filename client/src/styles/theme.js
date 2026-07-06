@@ -25,6 +25,17 @@ export const colors = {
     areaFill: 'rgba(30, 64, 175, 0.15)',
     reference: '#ef4444',
   },
+  updown: {
+    up: '#10B981',
+    down: '#EF4444',
+    flat: '#8899aa',
+  },
+  impact: {
+    High: '#EF4444',
+    Medium: '#FBBF24',
+    Low: '#8899aa',
+    Holiday: '#60a5fa',
+  },
 };
 
 export const fonts = {
@@ -34,6 +45,13 @@ export const fonts = {
 
 export function regimeColor(regime) {
   return colors.regime[regime] || colors.text.muted;
+}
+
+export function changeColor(pct) {
+  if (pct == null || !isFinite(pct)) return colors.text.muted;
+  if (pct > 0.00005) return colors.updown.up;
+  if (pct < -0.00005) return colors.updown.down;
+  return colors.updown.flat;
 }
 
 export function scoreColor(score) {

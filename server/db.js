@@ -49,6 +49,16 @@ db.exec(`
     fetched_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (series_id, date)
   );
+
+  -- Daily history of computed intraday metrics (breadth, vol, term structure).
+  -- One row per metric per market day; intraday refreshes upsert (last wins).
+  CREATE TABLE IF NOT EXISTS metric_history (
+    metric TEXT NOT NULL,
+    date TEXT NOT NULL,
+    value REAL NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (metric, date)
+  );
 `);
 
 const upsertObservation = db.prepare(`
@@ -121,6 +131,30 @@ export function getLatestSnapshot() {
   return db.prepare(`
     SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 1
   `).get();
+}
+
+const upsertMetricStmt = db.prepare(`
+  INSERT INTO metric_history (metric, date, value, updated_at)
+  VALUES (?, ?, ?, datetime('now'))
+  ON CONFLICT(metric, date) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+`);
+
+export function saveMetrics(date, metrics) {
+  const tx = db.transaction(() => {
+    for (const [metric, value] of Object.entries(metrics)) {
+      if (value != null && isFinite(value)) upsertMetricStmt.run(metric, date, value);
+    }
+  });
+  tx();
+}
+
+export function getMetricSeries(metric, days = 30) {
+  return db.prepare(`
+    SELECT date, value FROM metric_history
+    WHERE metric = ?
+    ORDER BY date DESC
+    LIMIT ?
+  `).all(metric, days).reverse();
 }
 
 export function getObservations(seriesId, limit = 120) {

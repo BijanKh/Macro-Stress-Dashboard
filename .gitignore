@@ -6,3 +6,4 @@ data/*.db-wal
 client/dist/
 .DS_Store
 Screenshot*
+data/*.json

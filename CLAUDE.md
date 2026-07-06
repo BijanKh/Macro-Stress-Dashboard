@@ -1,42 +1,104 @@
-# MACRO FINANCIAL STRESS MONITOR
+# TRADING DASHBOARD ("Godmode")
 
 ## Project Overview
 
-A full-stack financial stress monitoring dashboard that tracks 7 key macro indicators, computes a composite stress score (0–100), and provides a regime transition signal for timing the rotation from short-duration to long-duration Treasury positions.
+A full-stack multi-tab trader dashboard. Five tabs:
 
-**Use case:** The user is a macro investor monitoring credit markets, volatility, and funding stress to identify when the "growth shock" overtakes the "inflation shock" in a stagflationary environment (Iran war / oil crisis, 2026). When the composite score crosses ≥65, it signals the regime transition — time to initiate long-duration Treasury positions (20Y+).
+1. **Overview** (default, intraday) — index futures, world indices, volatility & sentiment (VIX/VIX3M term structure, MOVE, CNN Fear & Greed), breadth ratios (RSP/SPY, QQQ/SPY, IWM/SPY), sector heat strip, mega caps, commodities, crypto, today's economic events with countdown to the next high-impact USD/EUR release.
+2. **Sectors** (intraday) — sector ETF heatmap + sortable screener with daily % and week-to-date %, plus a sector/SPY relative-strength ratio table (replicates the user's TradingView watchlists).
+   **Trending** (daily scan) — "Setups Daytrading" (daily 12 EMA) and "Setups Swingtrading" (weekly 12 EMA) over S&P 500 + Nasdaq-100. Longs: above the 12 EMA, within 5% (day) / 10% (swing) of the TRUE all-time high (full-history weekly bars); shorts inverse vs the 52-WEEK low (index members are never near true ATLs — survivorship + decades-old split-adjusted prices; verified: closest was +22%) plus price ≥$5 and ≥$20M avg dollar volume. Ranked by closeness to the 12 EMA — tightest pullbacks first, filter guarantees the right side of the EMA (per user preference — NOT by RS or ATH proximity; RS vs SPY is a context column only). Distance to the 12 EMA shown in ATR units (≤1 = PULLBACK, >2.5 = EXTENDED). Extra lists "Strongest/Weakest Trending": whole-universe top/bottom 10 by RS momentum, filtered to price above/below the daily 12 EMA (weakest also gets the short liquidity floors). Tab sits LAST in the tab bar (user preference). 52w range from batched quote() pre-filters the setup pool (ATH ≥ 52w high makes it a strict superset); chart() pass fetches daily bars for ALL symbols (momentum needs them) + weekly full history for pool candidates (~770 calls, ~7 min). `server/trending.js`, `GET /api/trending`, scans once/day (lazy >20h + cron 16:45 ET), persisted to `data/trending.json`. Nasdaq-100 list scraped from Wikipedia (7d cache + `data/ndx100.json` fallback); degrades to S&P 500 only if that fails.
+3. **FX & Bonds** (intraday) — currencies incl. DXY, live US yields (^IRX/^FVX/^TNX/^TYX), FRED curve spreads, bond futures & ETFs. German/EU yields planned via ECB Data Portal.
+4. **Commodities** (intraday) — the user's TradingView commodity watchlist, categorized: Energy, Precious Metals, Gold & Silver Miners, Base Metals & Mining, Uranium & Nuclear, Battery & Strategic Metals, Agriculture, Broad Commodity (groups `cmd*` in `server/symbols.js`). LME nickel/lead/tin and XFRM have no free feed.
+5. **Crypto** — TOTAL/TOTAL2/TOTAL3 market caps, BTC/ETH dominance, top 20 by market cap (incl. price in BTC + 24h vs BTC), top-10 winners/losers of the day from the top-250 universe (stablecoins/wrapped excluded). Polls only while the tab is open (90s).
+6. **Credit & Macro** (weekly cadence) — the original credit-stress monitor, unchanged: 7 FRED indicators, composite stress score (0–100), duration-rotation signal at ≥65.
+7. **Calendar** — ForexFactory weekly economic calendar with impact/currency filters + watchlist earnings.
+
+Intraday tabs poll `/api/quotes` every 45s while visible (paused when the browser tab is hidden). The Credit tab loads once on mount with a manual refresh button.
+
+**Credit-tab use case:** The user is a macro investor monitoring credit markets, volatility, and funding stress to identify when the "growth shock" overtakes the "inflation shock" in a stagflationary environment (Iran war / oil crisis, 2026). When the composite score crosses ≥65, it signals the regime transition — time to initiate long-duration Treasury positions (20Y+).
+
+## Market Data Sources
+
+| Source | Used for | Notes |
+|---|---|---|
+| Yahoo Finance via `yahoo-finance2` | All intraday quotes (~77 symbols) | **Batched**: one `quote()` HTTP request per 45s refresh. Never fetch per-symbol in a loop — raw unauthenticated v8/chart calls get the IP 429-banned within minutes. `quote()`/`chart()` return ^TNX-family values as actual yields (4.47, NOT 44.7 — no /10 scaling). |
+| Yahoo `chart()` | Daily refs: week-to-date reference closes (all symbols, 30d bars) + SMA 20/50/200 for sector ETFs (450d bars) | Fetched sequentially with 300ms gaps + 15s timeout per call, cached 6h in memory, auto-refreshed on new ISO week. WTD/SMAs/breadth are null until the first pass completes (~5-8 min after first request). Breadth = % of sector ETFs (excl. SPY/QQQ/IWM broad-market, see `BREADTH_EXCLUDES`) above each SMA, in the `/api/quotes` payload as `breadth`. |
+| Yahoo `quoteSummary(calendarEvents)` | Watchlist earnings dates + EPS/revenue estimates (`GET /api/earnings`) | Watchlist = mega caps + `EXTRA_EARNINGS` in `server/symbols.js` (user adds own holdings there). Sequential, cached 12h. |
+| `server/sp500.js` | S&P 500 market breadth (% of ~502 members above 20/50/200d SMA), in `/api/quotes` as `spxBreadth` | Constituents scraped from Wikipedia (7d cache + `data/sp500.json` disk fallback; dots→dashes for Yahoo). 50/200d from batched quote() `fiftyDayAverage`/`twoHundredDayAverage` (4 chunks, 15min cache). 20d from a once-per-day sequential chart() pass (400ms gaps, ~10 min; null until first pass done). |
+| FRED | Credit tab (unchanged) + curve spreads on FX & Bonds tab | 1-business-day lag |
+| ForexFactory (`nfs.faireconomy.media/ff_calendar_thisweek.json`) | Economic calendar | Free weekly JSON, cached 4h, stale-served on failure |
+| CNN (`production.dataviz.cnn.io/index/fearandgreed/graphdata`) | Fear & Greed | Best-effort; null → UI hides it. Cached 30min, 5min backoff on failure |
+| CoinGecko free API (`/global` + `/coins/markets` top 250) | Crypto tab (`GET /api/crypto`) | No key. TOTAL2/3 derived from dominance %. Public rate limit is TIGHT (~5-15 req/min/IP): keep the 120s server cache and 90s tab-only polling; never poll per-coin. Per-coin YTD refs via `/coins/{id}/history` — 8s gaps + 10min pass backoff or it 429s. |
+| OKX public API (funding-rate + open-interest) | BTC/ETH perp funding + OI on Crypto tab | Binance AND Bybit are geo-blocked from this location — use OKX. |
+| CFTC Socrata (`publicreporting.cftc.gov/resource/6dca-aqww.json`) | COT card on FX & Bonds (`GET /api/cot`) | Legacy futures-only dataset, weekly. Match markets with `like 'NAME -%'` patterns. |
+| ECB Data Portal (`data-api.ecb.europa.eu/service/data/YC/...SR_{tenor}`) | Euro AAA gov curve (`GET /api/ecb-curve`) | ≈ Bund curve, daily, prev business day. |
+| Yahoo `options()` | SPY/QQQ OI walls (`GET /api/options`, 1h cache) + implied earnings moves (straddle/spot, enriched into `/api/earnings` for reports ≤14d out) | |
+| SQLite `metric_history` | 30d sparklines + breadth-divergence check (both in `/api/quotes` as `history`/`divergence`) | Upserted ≤1×/15min per day-row by `recordMetrics()`. Divergence needs 6 days of history before it can fire. |
+
+Other composed outputs in `/api/quotes`: `tape` (0-100 risk composite), `rrg` (sector rotation vs SPY — computed from the daily-pass close series, null until first pass completes). `GET /api/briefing` composes a rule-based morning briefing from all cached feeds. Frontend: chart-modal click-through on every tile/table row (TradingView widget embed, symbol mapping in `client/src/lib/tv.js`), keyboard shortcuts 1-7 for tabs.
+
+New API routes: `GET /api/quotes` (all groups + computed ratios + fearGreed, server-cached 45s with stampede guard, stale-on-error flag) and `GET /api/calendar`. Symbol universe lives in `server/symbols.js` — single source of truth for groups, labels and ratio pairs.
 
 ---
 
 ## Architecture
 
 ```
-macro-stress-monitor/
+dashboard/
 ├── CLAUDE.md                  # This file
 ├── .env                       # FRED API key (FRED_API_KEY=...)
 ├── package.json
 ├── server/
 │   ├── index.js               # Express server — API routes + static file serving
-│   ├── fred.js                # FRED API client — fetches all 10 series
+│   ├── fred.js                # FRED API client — credit-stress series
 │   ├── indicators.js          # Indicator computation + composite score logic
-│   ├── scheduler.js           # Cron job — auto-fetch during market hours
-│   └── db.js                  # SQLite interface — daily snapshots
+│   ├── scheduler.js           # Cron job — auto-fetch FRED during market hours
+│   ├── db.js                  # SQLite interface — daily snapshots
+│   ├── symbols.js             # Symbol universe: groups, labels, ratio pairs
+│   ├── yahoo.js               # yahoo-finance2 client — quotes, WTD refs, cache
+│   ├── calendar.js            # ForexFactory calendar feed (4h cache)
+│   ├── earnings.js            # Watchlist earnings via quoteSummary (12h cache)
+│   ├── sentiment.js           # CNN Fear & Greed (best-effort, 30min cache)
+│   ├── sp500.js               # S&P 500 constituents + market breadth (20/50/200d)
+│   ├── crypto.js              # CoinGecko + OKX derivs: caps, dominance, funding/OI
+│   ├── metrics.js             # Daily metric_history persistence + divergence check
+│   ├── tape.js                # Tape Score composite (breadth/vol/term/sentiment/credit)
+│   ├── briefing.js            # Rule-based briefing composer (pure function)
+│   ├── options.js             # Yahoo option chains: SPY/QQQ OI walls, implied earnings moves
+│   ├── cot.js                 # CFTC COT via Socrata (weekly, 9 markets, 1y percentile)
+│   ├── optionsdash.js         # Per-ticker options dashboard (GET /api/options-dash?symbol=X):
+│   │                          #   IV30/term structure/skew, expected moves, max pain, OI walls,
+│   │                          #   IV vs RV20, unusual activity, BS dealer-gamma profile + flip.
+│   │                          #   10min LRU cache; IV30 recorded daily to metric_history for IV rank.
+│   ├── trending.js            # Daily trend scan (S&P 500 + NDX-100): 12 EMA day/week setups,
+│   │                          #   ATH band longs / 52w-low band shorts, ranked by 12-EMA closeness
+│   └── ecb.js                 # Euro AAA gov curve from ECB Data Portal (6h cache)
 ├── client/
 │   ├── index.html             # Entry HTML
 │   ├── src/
-│   │   ├── App.jsx            # Main dashboard component
+│   │   ├── App.jsx            # Tab shell (header + TabBar + keep-alive panels)
+│   │   ├── tabs/
+│   │   │   ├── OverviewTab.jsx    # Godmode: futures, world, vol, breadth, heat strip, events
+│   │   │   ├── SectorsTab.jsx     # Heatmap + sector screener + sector/SPY ratios
+│   │   │   ├── TrendingTab.jsx    # Daytrading/Swingtrading setup lists (10 long / 10 short each)
+│   │   │   ├── FXBondsTab.jsx     # Currencies, live US yields, curve, bond futures/ETFs
+│   │   │   ├── CreditTab.jsx      # Original credit-stress dashboard (moved verbatim)
+│   │   │   └── CalendarTab.jsx    # Weekly calendar with impact/currency filters
 │   │   ├── components/
-│   │   │   ├── Gauge.jsx      # Semicircular stress gauge
-│   │   │   ├── IndicatorCard.jsx  # Individual indicator card
-│   │   │   ├── HYChart.jsx    # HY OAS history chart
-│   │   │   ├── YieldCurve.jsx # Treasury yield curve
-│   │   │   ├── ScoreHistory.jsx   # Composite score over time (from SQLite)
-│   │   │   ├── SignalBox.jsx  # Duration signal + regime context
-│   │   │   └── ScoreBar.jsx   # Indicator comparison bar chart
+│   │   │   ├── TabBar.jsx, Pct.jsx, QuoteTile.jsx, QuoteTable.jsx
+│   │   │   ├── SectorHeatmap.jsx, VolPanel.jsx, EventStrip.jsx
+│   │   │   ├── BreadthPanel.jsx, EarningsPanel.jsx
+│   │   │   ├── Gauge.jsx, IndicatorCard.jsx, HYChart.jsx, YieldCurve.jsx
+│   │   │   ├── ScoreHistory.jsx, SignalBox.jsx, ScoreBar.jsx, InfoTooltip.jsx
+│   │   ├── context/
+│   │   │   └── QuotesContext.jsx  # Shared 45s quote poller + 30min calendar poller
+│   │   ├── hooks/
+│   │   │   └── useVisibilityPolling.js  # Poll while enabled + tab visible
 │   │   ├── lib/
-│   │   │   └── api.js         # Frontend API client
+│   │   │   ├── api.js         # Frontend API client
+│   │   │   └── format.js      # fmtPrice / fmtPct (signed)
 │   │   └── styles/
-│   │       └── theme.js       # Design tokens, colors, fonts
+│   │       └── theme.js       # Design tokens incl. updown + impact colors
 │   └── vite.config.js
 ├── data/
 │   └── stress.db              # SQLite database (auto-created)

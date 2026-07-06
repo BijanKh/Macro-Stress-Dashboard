@@ -9,6 +9,21 @@ import { fetchAllSeries, SERIES } from './fred.js';
 import { computeIndicators } from './indicators.js';
 import { saveObservations, saveSnapshot, getHistory, getHYHistory, getLatestSnapshot } from './db.js';
 import { startScheduler } from './scheduler.js';
+import { getQuotes } from './yahoo.js';
+import { getCalendar } from './calendar.js';
+import { getEarnings } from './earnings.js';
+import { getFearGreed } from './sentiment.js';
+import { getSpxBreadth } from './sp500.js';
+import { getCrypto } from './crypto.js';
+import { recordMetrics, getHistoryBundle, computeDivergence } from './metrics.js';
+import { computeTapeScore } from './tape.js';
+import { composeBriefing } from './briefing.js';
+import { getOIWalls } from './options.js';
+import { getOptionsDashboard, invalidateSymbol } from './optionsdash.js';
+import { importIvCsv } from './ivimport.js';
+import { getCot } from './cot.js';
+import { getEcbCurve } from './ecb.js';
+import { getTrending, startTrendingScheduler } from './trending.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProduction = process.env.NODE_ENV === 'production';
@@ -32,13 +47,14 @@ const ALLOWED_ORIGINS = process.env.CORS_ORIGINS
 
 app.use(cors({
   origin: ALLOWED_ORIGINS,
-  methods: ['GET', 'HEAD', 'OPTIONS'],
+  methods: ['GET', 'HEAD', 'OPTIONS', 'POST'],
 }));
 
-// Rate limiting
+// Rate limiting — 600/15min leaves headroom for the intraday tabs polling
+// /api/quotes every 45s (20 req/15min per open window) plus tab switches.
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 600,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests, please try again later.' },
@@ -161,6 +177,149 @@ app.get('/api/hy-history', (req, res) => {
   res.json({ history: getHYHistory(days) });
 });
 
+app.get('/api/quotes', async (req, res) => {
+  try {
+    const [quotes, fearGreed, spxBreadth] = await Promise.all([
+      getQuotes(), getFearGreed(), getSpxBreadth(),
+    ]);
+    recordMetrics(quotes, spxBreadth);
+    const creditSnapshot = cachedResult
+      ? { composite: cachedResult.composite }
+      : (() => { const s = getLatestSnapshot(); return s ? { composite: s.composite_score } : null; })();
+    const tape = computeTapeScore({
+      quotes, spxBreadth, fearGreed,
+      creditComposite: creditSnapshot?.composite ?? null,
+    });
+    res.json({
+      ...quotes,
+      fearGreed,
+      spxBreadth,
+      tape,
+      history: getHistoryBundle(30),
+      divergence: computeDivergence(quotes, spxBreadth),
+    });
+  } catch (err) {
+    console.error('Error in /api/quotes:', err);
+    res.status(502).json({ error: 'Failed to load quotes.' });
+  }
+});
+
+app.get('/api/briefing', async (req, res) => {
+  try {
+    const [quotes, fearGreed, spxBreadth, calendar, earnings] = await Promise.all([
+      getQuotes(), getFearGreed(), getSpxBreadth(), getCalendar(), getEarnings(),
+    ]);
+    let crypto = null;
+    try { crypto = await getCrypto(); } catch {}
+    const snapshot = cachedResult || getLatestSnapshot();
+    const credit = snapshot
+      ? {
+          composite: snapshot.composite ?? snapshot.composite_score,
+          regime: snapshot.regime,
+          signalActive: snapshot.signalActive ?? snapshot.signal_active === 1,
+        }
+      : null;
+    const tape = computeTapeScore({
+      quotes, spxBreadth, fearGreed, creditComposite: credit?.composite ?? null,
+    });
+    res.json(composeBriefing({
+      quotes, spxBreadth, fearGreed, calendar, earnings, crypto, tape,
+      divergence: computeDivergence(quotes, spxBreadth), credit,
+    }));
+  } catch (err) {
+    console.error('Error in /api/briefing:', err);
+    res.status(502).json({ error: 'Failed to compose briefing.' });
+  }
+});
+
+app.get('/api/options', async (req, res) => {
+  try {
+    res.json({ walls: (await getOIWalls()) || [] });
+  } catch (err) {
+    console.error('Error in /api/options:', err);
+    res.status(502).json({ error: 'Failed to load options data.' });
+  }
+});
+
+app.get('/api/options-dash', async (req, res) => {
+  try {
+    res.json(await getOptionsDashboard(req.query.symbol));
+  } catch (err) {
+    console.error('Error in /api/options-dash:', err.message);
+    res.status(404).json({ error: err.message || 'Failed to load options data.' });
+  }
+});
+
+// IV history CSV import (MarketChameleon export) — backfills iv30_{SYMBOL}
+app.post('/api/iv-import', express.text({ limit: '5mb', type: '*/*' }), (req, res) => {
+  try {
+    const symbol = String(req.query.symbol || '').toUpperCase().trim();
+    if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(symbol)) {
+      return res.status(400).json({ error: 'Invalid symbol' });
+    }
+    const result = importIvCsv(symbol, req.body);
+    invalidateSymbol(symbol);
+    res.json(result);
+  } catch (err) {
+    console.error('Error in /api/iv-import:', err.message);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/cot', async (req, res) => {
+  try {
+    res.json(await getCot());
+  } catch (err) {
+    console.error('Error in /api/cot:', err);
+    res.status(502).json({ error: 'Failed to load COT data.' });
+  }
+});
+
+app.get('/api/ecb-curve', async (req, res) => {
+  try {
+    res.json((await getEcbCurve()) || { asOf: null, yields: {} });
+  } catch (err) {
+    console.error('Error in /api/ecb-curve:', err);
+    res.status(502).json({ error: 'Failed to load ECB curve.' });
+  }
+});
+
+app.get('/api/trending', async (req, res) => {
+  try {
+    res.json(await getTrending(req.query.refresh === '1'));
+  } catch (err) {
+    console.error('Error in /api/trending:', err);
+    res.status(502).json({ error: 'Failed to load trending setups.' });
+  }
+});
+
+app.get('/api/calendar', async (req, res) => {
+  try {
+    res.json(await getCalendar());
+  } catch (err) {
+    console.error('Error in /api/calendar:', err);
+    res.status(502).json({ error: 'Failed to load calendar.' });
+  }
+});
+
+app.get('/api/crypto', async (req, res) => {
+  try {
+    res.json(await getCrypto());
+  } catch (err) {
+    console.error('Error in /api/crypto:', err);
+    res.status(502).json({ error: 'Failed to load crypto data.' });
+  }
+});
+
+app.get('/api/earnings', async (req, res) => {
+  try {
+    res.json(await getEarnings());
+  } catch (err) {
+    console.error('Error in /api/earnings:', err);
+    res.status(502).json({ error: 'Failed to load earnings.' });
+  }
+});
+
 app.get('/api/refresh', refreshLimiter, async (req, res) => {
   try {
     const result = await fetchAndStore();
@@ -181,4 +340,5 @@ if (isProduction) {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT} (${isProduction ? 'production' : 'development'})`);
   startScheduler(fetchAndStore);
+  startTrendingScheduler();
 });
